@@ -1,0 +1,225 @@
+<?php
+
+/**
+ * @file
+ * The main module file.
+ */
+
+use Stripe\Stripe;
+use Stripe\PaymentIntent;
+
+define('BCSHOP_STRIPE_MAX_TRANSACTION_STATUS_CHECK_RETRIES', 5);
+
+define('BCSHOP_STRIPE_TRANSACTION_STATUS_RECHECK_TIME', 1800);
+
+/**
+ * Implements hook_menu().
+ */
+function bcshop_stripe_menu() {
+  $items['admin/commerce/config/payment-methods/bcshop-stripe'] = [
+    'title' => 'BCShop Stripe settings',
+    'file' => 'bcshop_stripe.admin.inc',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => ['bschop_stripe_settings_form'],
+    'access arguments' => ['administer site configuration'],
+  ];
+
+  $items['bcshop-stripe/payment-return/%commerce_payment_transaction/%'] = [
+    'page callback' => 'bcshop_stripe_process_return',
+    'page arguments' => array(2, 3),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+    'file' => 'bcshop_stripe.payment.inc',
+  ];
+
+  return $items;
+}
+
+/**
+ * Implements hook_libraries_info().
+ */
+function bcshop_stripe_libraries_info() {
+
+  $libraries = [];
+  $libraries['stripe-php'] = [
+    'name' => 'Stripe API Client Library for PHP',
+    'vendor url' => 'https://stripe.com/',
+    'download url' => 'https://github.com/stripe/stripe-php',
+    'dependencies' => [],
+    'version arguments' => [
+      'file' => 'VERSION',
+      'pattern' => '/((\d+)\.(\d+)\.(\d+))/',
+      'lines' => 1,
+      'cols' => 12,
+    ],
+    'files' => [
+      'php' => [
+        'init.php',
+      ],
+    ],
+  ];
+
+  return $libraries;
+}
+
+/**
+ * Implements hook_library().
+ */
+function bcshop_stripe_library() {
+
+  $libraries = [];
+  $libraries['stripe-front'] = [
+    'title' => 'BCShop Stripe',
+    'website' => 'https://stripe.com/',
+    'version' => '1.0',
+    'js' => [
+      'https://js.stripe.com/v3/' => ['type' => 'external'],
+      drupal_get_path('module', 'bcshop_stripe') . '/js/stripe_integration.js' => [],
+    ],
+  ];
+
+  return $libraries;
+}
+
+/**
+ * Implements hook_commerce_payment_method_info().
+ */
+function bcshop_stripe_commerce_payment_method_info() {
+  $payment_methods = array();
+
+  $payment_methods['bcshop_stripe'] = array(
+    'title' => t('Stripe for BCShop'),
+    'short_title' => t('Stripe BC'),
+    'display_title' => t('Credit card'),
+    'description' => t('Stripe payment gateway for British Council Shops'),
+    'active' => FALSE,
+    'terminal' => TRUE,
+    'offsite' => TRUE,
+    'offsite_autoredirect' => FALSE,
+    'callbacks' => [
+      'redirect_form' => 'bcshop_stripe_redirect_form',
+    ],
+    'file' => 'bcshop_stripe.payment.inc',
+  );
+
+  return $payment_methods;
+}
+
+/**
+ * Helper function to get Stripe settings.
+ */
+function _bcshop_stripe_get_api_keys($key = FALSE) {
+  $settings = &drupal_static(__FUNCTION__);
+
+  if (!isset($settings)) {
+    $config = variable_get('commerce_stripe_environment_settings', []);
+
+    if (empty($config)) {
+      throw new Exception('Stripe API keys are not configured.');
+    }
+
+    if (variable_get('site_env', FALSE) !== 'live') {
+      $settings = $config['TEST'];
+    }
+    else {
+      $settings = $config['LIVE'];
+    }
+  }
+
+  if (!empty($key)) {
+    if (isset($settings[$key])) {
+      return $settings[$key];
+    }
+    throw new Exception('Invalid setting requested.');
+  }
+  return $settings;
+}
+
+/**
+ * Check payment transaction status.
+ */
+function _bcshop_stripe_check_transaction_status($transaction) {
+
+  $order = commerce_order_load($transaction->order_id);
+
+  libraries_load('stripe-php');
+
+  // Initialize Stripe and retrieve the payment intent.
+  Stripe::setApiKey(_bcshop_stripe_get_api_keys('secret_key'));
+
+  // Handle transactions with incorrect data and items that were processed
+  // somehow after being added to queue first.
+  if (!isset($transaction->data['payment_intent_id']) || !$payment_intent = PaymentIntent::retrieve($transaction->data['payment_intent_id'])) {
+    $transaction->status = COMMERCE_PAYMENT_STATUS_FAILURE;
+    commerce_payment_transaction_save($transaction);
+  }
+  elseif (!in_array($transaction->status, [COMMERCE_PAYMENT_STATUS_SUCCESS, COMMERCE_PAYMENT_STATUS_FAILURE], TRUE)) {
+
+    // Update count of status checks for the transaction.
+    if (!isset($transaction->data['status_check_count'])) {
+      $transaction->data['status_check_count'] = 1;
+    }
+    else {
+      $transaction->data['status_check_count']++;
+    }
+
+    // Update transaction data.
+    $transaction->remote_status = $payment_intent->status;
+    $transaction->payload = $payment_intent->toArray();
+
+    if ($payment_intent->status === PaymentIntent::STATUS_SUCCEEDED) {
+      $transaction->status = COMMERCE_PAYMENT_STATUS_SUCCESS;
+      commerce_payment_transaction_save($transaction);
+      commerce_payment_redirect_pane_next_page($order);
+    }
+    else {
+      if ($transaction->data['status_check_count'] >= BCSHOP_STRIPE_MAX_TRANSACTION_STATUS_CHECK_RETRIES) {
+        $transaction->status = COMMERCE_PAYMENT_STATUS_FAILURE;
+      }
+      commerce_payment_transaction_save($transaction);
+      commerce_payment_redirect_pane_previous_page($order);
+    }
+  }
+}
+
+/**
+ * Implements hook_cron_queue_info().
+ */
+function bcshop_stripe_cron_queue_info() {
+  $queues['bcshop_stripe_transaction_check'] = array(
+    'worker callback' => 'bcshop_stripe_transaction_status_checker',
+    'time' => 30,
+  );
+  return $queues;
+}
+
+/**
+ * Queue worker callback.
+ */
+function bcshop_stripe_transaction_status_checker($item) {
+  $transaction = commerce_payment_transaction_load($item->transaction_id);
+  _bcshop_stripe_check_transaction_status($transaction);
+}
+
+/**
+ * Implements hook_cron().
+ */
+function bcshop_stripe_cron() {
+  // Fetch pending transactions created more than half an hour ago
+  // and check their statuses in case someone didn't get the success
+  // URL loaded properly after finalizing payment.
+  $query = new EntityFieldQuery();
+  $query
+    ->entityCondition('entity_type', 'commerce_payment_transaction')
+    ->propertyCondition('payment_method', 'bcshop_stripe')
+    ->propertyCondition('status', COMMERCE_PAYMENT_STATUS_PENDING)
+    ->propertyCondition('created', REQUEST_TIME - BCSHOP_STRIPE_TRANSACTION_STATUS_RECHECK_TIME, '<');
+  $results = $query->execute();
+
+  if (!empty($results['commerce_payment_transaction'])) {
+    $queue = DrupalQueue::get('bcshop_stripe_transaction_check');
+    foreach ($results['commerce_payment_transaction'] as $transaction) {
+      $queue->createItem($transaction);
+    }
+  }
+}
