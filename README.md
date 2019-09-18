@@ -42,5 +42,6 @@ $conf['site_env'] = 'anything else';
 * Update module namespace
 * Test
 * Implement a config page where one can set values of test and live API keys.
+* Implement automatic redirection.
 * Implement Checkout in an iframe.
 * Implement other integration types.
