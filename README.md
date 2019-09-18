@@ -28,6 +28,14 @@ $conf['commerce_stripe_environment_settings'] = array(
 );
 ```
 
+Set the current environment:
+
+```
+// For live:
+// $conf['site_env'] = 'live';
+// Or for test:
+$conf['site_env'] = 'anything else';
+```
 
 ## TODO
 
