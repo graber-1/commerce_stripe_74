@@ -16,14 +16,6 @@ define('BCSHOP_STRIPE_TRANSACTION_STATUS_RECHECK_TIME', 1800);
  * Implements hook_menu().
  */
 function bcshop_stripe_menu() {
-  $items['admin/commerce/config/payment-methods/bcshop-stripe'] = [
-    'title' => 'BCShop Stripe settings',
-    'file' => 'bcshop_stripe.admin.inc',
-    'page callback' => 'drupal_get_form',
-    'page arguments' => ['bschop_stripe_settings_form'],
-    'access arguments' => ['administer site configuration'],
-  ];
-
   $items['bcshop-stripe/payment-return/%commerce_payment_transaction/%'] = [
     'page callback' => 'bcshop_stripe_process_return',
     'page arguments' => array(2, 3),
